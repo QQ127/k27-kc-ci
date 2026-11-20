@@ -51,6 +51,35 @@ jobs:
           cp -R droidvm/patches/xnu-12377 unixnu-ios26/patches/xnu-12377
           echo "patches: $(ls unixnu-ios26/patches/xnu-12377/*.patch | wc -l)"
 
+      - name: Add K27 early framebuffer diagnostic patch (green band on kernel entry)
+        run: |
+          cat > unixnu-ios26/patches/xnu-12377/9999-k27-early-fb-diag.patch <<'K27PATCH'
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -480,6 +480,18 @@
+ 	MSR_VBAR_EL1_X0
+ 
+ 
++	/* K27-EARLY-DIAG: paint top 2 framebuffer rows bright green (physical, MMU off) */
++	mov	x6, x20
++	ldr	x0, [x6, #0x28]
++	cbz	x0, Lk27diag_done
++	ldr	x1, [x6, #0x38]
++	lsl	x1, x1, #1
++	mov	w2, #0x00FF0000
++	mov	x3, x0
++Lk27diag_loop:	str	w2, [x3], #4
++	subs	x1, x1, #4
++	b.gt	Lk27diag_loop
++Lk27diag_done:
+ 	// Get the kernel memory parameters from the boot args
+ 	ldr		x22, [x20, BA_VIRT_BASE]			// Get the kernel virt base
+ 	ldr		x23, [x20, BA_PHYS_BASE]			// Get the kernel phys base
+K27PATCH
+          echo "patches now: $(ls unixnu-ios26/patches/xnu-12377/*.patch | wc -l)"
+          tail -20 unixnu-ios26/patches/xnu-12377/9999-k27-early-fb-diag.patch
+
       - name: Switch to arm64e + macOS target (firehose arm64e too)
         run: |
           cd unixnu-ios26
