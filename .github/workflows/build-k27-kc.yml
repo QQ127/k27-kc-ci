@@ -232,6 +232,38 @@ jobs:
               off += size
           PY
 
+      - name: Tolerate private Apple symbols absent from source-built kernel
+        working-directory: droidvm
+        run: |
+          python3 - <<'PYTOL'
+          p='k27/kc-build27.py'
+          s=open(p).read()
+          # Our rebuilt XNU lacks a few Apple-private symbols that borrowed kexts
+          # reference by chained pointer (e.g. _os_log_coprocessor_with_handle).
+          # Remap.map aborts on these. Wrap it: when the old-kernel target's names
+          # are all undefined in the new kernel, keep the original address (the KC
+          # layout pins our kernel to the old VMADDRs) instead of failing the build.
+          anchor='module.main()'
+          assert anchor in s, 'main anchor missing'
+          inject='''# tolerate private symbols missing from the source-built kernel
+          _orig_map = module.kc_reloc.Remap.map
+          def _map_tolerant(self, va, exact=False):
+              try:
+                  return _orig_map(self, va, exact)
+              except module.kc_reloc.Unresolvable as exc:
+                  # Only degrade chained-data pointers (exact=False). Text branches
+                  # (exact=True) must still fail loudly: a wrong branch target is unsafe.
+                  if exact:
+                      raise
+                  print('TOLERATED unresolvable kernel symbol %#x: %s' % (va, exc))
+                  return va
+          module.kc_reloc.Remap.map = _map_tolerant
+          '''
+          s=s.replace(anchor, inject+chr(10)+anchor, 1)
+          open(p,'w').write(s)
+          print('patched Remap.map tolerant fallback')
+          PYTOL
+
       - name: Build KC (kc-build27.py - kernel-only fileset)
         working-directory: droidvm
         run: |
