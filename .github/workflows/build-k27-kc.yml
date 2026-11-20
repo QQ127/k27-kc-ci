@@ -1,0 +1,258 @@
+name: build-k27-kc
+
+# Build the k27 KC-layout kernel: xnu-12377 arm64e macOS kernel with owner macros and
+# ArmDTPlatform/ArmCpu, linked with a KC segment layout computed by k27/kc27-layout.py
+# from the actual kernel sizes, then link that kernel into the macOS 27 kernel collection
+# with k27/kc-build27.py (kernel-only fileset KC: no native kexts yet).
+#
+# Two kernel passes:
+#   1. plain layout (no XNU_KC_SEGADDRS) -> a fully linked kernel to measure segment sizes;
+#   2. kc27-layout.py regenerates the -segaddr list + segaddrs.json from those sizes + kc27.bin,
+#      then the kernel is re-linked (patches skipped via XNU_NO_PATCH=1) and the KC is built.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      UNIXNU_KDK_URL: https://github.com/dortania/KdkSupportPkg/releases/download/26A434/Kernel_Debug_Kit_27.0.1_build_26A434.dmg
+      UNIXNU_KDK_SHA256: 9d0122b21427a78b4659da16d4363ec859bb2058a7a666332191e79a5a6ac96e
+    steps:
+      - name: Checkout UniXNU ios26 (build machinery)
+        uses: actions/checkout@v4
+        with:
+          repository: none24smu/UniXNU
+          ref: ios26
+          path: unixnu-ios26
+
+      - name: Checkout DroidVM macOS (47 k27 patches + k27 scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: QQ127/macOS-DroidVM
+          path: droidvm
+
+      - name: Fetch board driver sources (ArmCpu + ArmDTPlatform)
+        run: |
+          git clone --depth 1 https://github.com/UniXNU/ArmCpu.git unixnu-ios26/drivers/ArmCpu
+          git clone --depth 1 https://github.com/UniXNU/ArmDTPlatform.git unixnu-ios26/drivers/ArmDTPlatform
+          ls unixnu-ios26/drivers/ArmCpu/ArmCpu.cpp unixnu-ios26/drivers/ArmDTPlatform/ArmDTPlatform.cpp
+
+      - name: Install host tools (ipsw + GNU sed)
+        run: |
+          brew install unifdef cmake ninja gnu-sed blacktop/tap/ipsw
+          echo "$(brew --prefix gnu-sed)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Swap in the 47 DroidVM k27 patches
+        run: |
+          rm -rf unixnu-ios26/patches/xnu-12377
+          cp -R droidvm/patches/xnu-12377 unixnu-ios26/patches/xnu-12377
+          echo "patches: $(ls unixnu-ios26/patches/xnu-12377/*.patch | wc -l)"
+
+      - name: Switch to arm64e + macOS target (firehose arm64e too)
+        run: |
+          cd unixnu-ios26
+          sed -i.bak \
+            -e 's|ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 |ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64e |' \
+            -e 's|-DXNU_TARGET_OS_IOS|-DXNU_TARGET_OS_OSX|' \
+            -e 's|ARCHS=arm64 VALID_ARCHS=arm64 |ARCHS=arm64e VALID_ARCHS=arm64e |' \
+            scripts/build-xnu-12377.sh
+          grep -nE "SDKROOT=|ARCH_STRING_FOR|TARGET_OS|ARCHS=|VALID_ARCHS=" scripts/build-xnu-12377.sh | head
+
+      - name: Add relink-only + KC-segaddrs support to build-xnu-12377.sh
+        run: |
+          cd unixnu-ios26
+          python3 - <<'PY'
+          p = 'scripts/build-xnu-12377.sh'
+          s = open(p).read()
+
+          # A relink-only pass (pass 2) must not re-apply the patch series; the working
+          # tree is already patched, and overlapping patches make a forward --check fail.
+          old_loop = 'for PATCH in "$PATCHES"/*.patch; do\n'
+          new_loop = 'for PATCH in "$PATCHES"/*.patch; do [ "${XNU_NO_PATCH:-0}" = 1 ] && break;\n'
+          assert old_loop in s, 'patch-loop line not found'
+          s = s.replace(old_loop, new_loop, 1)
+
+          # Route XNU_KC_SEGADDRS and the threaded-rebase flags into the kernel link.
+          # DEPLOYMENT_TARGET_FLAGS is the one make variable this script already passes on the
+          # command line that xnu appends to LDFLAGS_KERNEL (makedefs/MakeInc.def); the extra
+          # -Wl,... flags are ignored during compile-only steps and only reach the final ld64 link.
+          # -Wl,-fixup_chains: an iOS-target arm64e -static link defaults to -no_fixup_chains
+          # (opcode rebases, empty __TEXT,__thread_starts). kc-build.py reads __TEXT,__thread_starts
+          # (threaded rebases), so force the chained-fixup format, which emits a non-empty
+          # __thread_starts. (-threaded_starts_section no longer exists on the macOS 27 ld64;
+          # it is implied by the chained-fixup format.)
+          old_dtf = 'DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=$IOS_MIN -DXNU_TARGET_OS_OSX" \\\n'
+          new_dtf = 'DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=$IOS_MIN -DXNU_TARGET_OS_OSX -Wl,-fixup_chains ${XNU_KC_SEGADDRS:-}" \\\n'
+          assert old_dtf in s, 'deployment-target-flags line not found'
+          s = s.replace(old_dtf, new_dtf, 1)
+
+          open(p, 'w').write(s)
+          print('patched: XNU_NO_PATCH guard + XNU_KC_SEGADDRS link injection')
+          PY
+          grep -nE 'XNU_NO_PATCH|XNU_KC_SEGADDRS|DEPLOYMENT_TARGET_FLAGS=' scripts/build-xnu-12377.sh
+
+      - name: Patch build-platform-12377.py for arm64e + macOS target
+        run: |
+          cd unixnu-ios26
+          python3 - <<'PY'
+          p = 'scripts/build-platform-12377.py'
+          s = open(p).read()
+          old1 = "if struct.unpack_from('<4I', data) != (0xfeedfacf, 0x100000c, 0, 1):\n    raise SystemExit('Expected a plain ARM64 Mach-O object')"
+          new1 = "magic, cputype, subtype, filetype = struct.unpack_from('<4I', data)\nif (magic, cputype, filetype) != (0xfeedfacf, 0x100000c, 1):\n    raise SystemExit(f'Expected an ARM64 Mach-O object, got magic={magic:#x} cputype={cputype:#x} subtype={subtype:#x} filetype={filetype}')"
+          assert old1 in s, 'object-check pattern not found'
+          s = s.replace(old1, new1)
+          old2 = "if deployment != (2, 26 << 16):\n    raise SystemExit(f'Expected iOS 26 deployment, found {deployment}')"
+          new2 = "if deployment is None or deployment[1] != 26 << 16 or deployment[0] not in (1, 2):\n    raise SystemExit(f'Expected iOS/macOS 26 deployment, found {deployment}')"
+          assert old2 in s, 'deployment-check pattern not found'
+          s = s.replace(old2, new2)
+          old3 = "        subprocess.run(['git', 'apply', '--directory', str(out.relative_to(ROOT)), driver_patch], cwd=ROOT, check=True)"
+          new3 = ("        # the public UniXNU/ArmCpu repo (main) already ships both the assembly style fix\n"
+                  "        # (; -> newline in inline asm) and the 12377 boot-interrupt reordering; applying\n"
+                  "        # them again fails because the surrounding context has since moved.\n"
+                  "        continue")
+          assert old3 in s, 'armcpu-patch pattern not found'
+          s = s.replace(old3, new3)
+          open(p, 'w').write(s)
+          print('patched build-platform-12377.py for arm64e/macOS + skip applied ArmCpu patches')
+          PY
+
+      - name: Pass 1 - plain layout (owner macros + board drivers, no KC segaddrs)
+        working-directory: unixnu-ios26
+        run: |
+          echo "== toolchain =="
+          xcodebuild -version
+          export XNU_ARM_DT_PLATFORM=1
+          export XNU_ARMCPU=1
+          export XNU_NATIVE_ARCH_TIMER=1
+          export XNU_SOURCE_CORECRYPTO14=0
+          export XNU_EXTRA_CFLAGS="-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding -DXNU_NATIVE_CS_HASH_CACHE=1 -DXNU_NATIVE_RAM_BLOCK=1 -DXNU_OWNER_CACHE_MOUNT=1 -DXNU_OWNER_BOOT_MANIFEST=1 -DXNU_OWNER_CACHE_STARTUP=1"
+          echo "== build (pass 1) =="
+          set +e
+          JOBS=$(sysctl -n hw.ncpu) bash scripts/build-xnu-12377.sh > /tmp/pass1.log 2>&1
+          rc=$?
+          echo "pass1 rc=$rc"
+          tail -40 /tmp/pass1.log
+          exit $rc
+
+      - name: Re-extract kc27.bin (macOS 27 kernel collection)
+        run: |
+          set -euo pipefail
+          cd droidvm
+          rm -rf artifacts/27.0.1
+          python3 scripts/macos-inputs.py \
+            --profile configs/macos-27.0.1-26A434.json \
+            --output artifacts/27.0.1/metadata
+          python3 scripts/macos-fetch-member.py 'KernelCache' \
+            --profile configs/macos-27.0.1-26A434.json \
+            --inventory artifacts/27.0.1/metadata/identities.json \
+            --identity vma2macosap \
+            --output-dir artifacts/27.0.1
+          ipsw kernel dec artifacts/27.0.1/kernelcache.release.vma2 -o /tmp/kcdec
+          mv /tmp/kcdec/kernelcache.release.vma2.decompressed artifacts/27.0.1/kc27.bin
+          rmdir /tmp/kcdec
+          file artifacts/27.0.1/kc27.bin
+          ls -la artifacts/27.0.1/kc27.bin
+
+      - name: Regenerate KC segment layout (kc27-layout.py)
+        run: |
+          set -euo pipefail
+          KERNEL=unixnu-ios26/build/xnu-12377.121.6/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf
+          ls -la "$KERNEL"
+          cd droidvm
+          python3 k27/kc27-layout.py artifacts/27.0.1/kc27.bin "../$KERNEL" --write /tmp/segaddrs.sh
+          echo "--- regenerated segaddrs ---"
+          cat /tmp/segaddrs.sh
+          echo "--- regenerated segaddrs.json ---"
+          cat /tmp/segaddrs.json
+          cp /tmp/segaddrs.json k27/segaddrs.json
+          echo "k27/segaddrs.json updated"
+
+      - name: Pass 2 - relink with the regenerated KC layout
+        working-directory: unixnu-ios26
+        run: |
+          export XNU_ARM_DT_PLATFORM=1
+          export XNU_ARMCPU=1
+          export XNU_NATIVE_ARCH_TIMER=1
+          export XNU_SOURCE_CORECRYPTO14=0
+          export XNU_NO_PATCH=1
+          export XNU_EXTRA_CFLAGS="-Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding -DXNU_NATIVE_CS_HASH_CACHE=1 -DXNU_NATIVE_RAM_BLOCK=1 -DXNU_OWNER_CACHE_MOUNT=1 -DXNU_OWNER_BOOT_MANIFEST=1 -DXNU_OWNER_CACHE_STARTUP=1"
+          export XNU_KC_SEGADDRS="$(bash /tmp/segaddrs.sh)"
+          echo "== KC segaddrs =="
+          echo "$XNU_KC_SEGADDRS"
+          echo "== relink (pass 2) =="
+          set +e
+          JOBS=$(sysctl -n hw.ncpu) bash scripts/build-xnu-12377.sh > /tmp/pass2.log 2>&1
+          rc=$?
+          echo "pass2 rc=$rc"
+          tail -60 /tmp/pass2.log
+          exit $rc
+
+      - name: Verify the KC-layout kernel segments
+        run: |
+          KERNEL=unixnu-ios26/build/xnu-12377.121.6/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf
+          ls -la "$KERNEL"
+          echo "--- LC_SEGMENT_64 vmaddrs ---"
+          python3 - "$KERNEL" <<'PY'
+          import struct, sys
+          data = open(sys.argv[1], 'rb').read()
+          count = struct.unpack_from('<I', data, 16)[0]
+          off = 32
+          for _ in range(count):
+              cmd, size = struct.unpack_from('<II', data, off)
+              if cmd == 0x19:
+                  name = data[off+8:off+24].split(b'\0')[0].decode()
+                  va, vs = struct.unpack_from('<2Q', data, off+24)
+                  print(f'{name:16} 0x{va:016x} size=0x{vs:x}')
+              off += size
+          PY
+
+      - name: Build KC (kc-build27.py - kernel-only fileset)
+        working-directory: droidvm
+        run: |
+          set -euo pipefail
+          KERNEL=../unixnu-ios26/build/xnu-12377.121.6/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf
+          ls -la "$KERNEL"
+          echo "--- segaddrs.json ---"
+          cat k27/segaddrs.json
+          echo "--- keep list ---"
+          cat configs/kc-keep.txt
+          echo "--- kc-build27 ---"
+          python3 k27/kc-build27.py artifacts/27.0.1/kc27.bin "$KERNEL" artifacts/27.0.1/kc-k27.bin \
+            --keep $(tr '\n' ' ' < configs/kc-keep.txt)
+          echo "--- result ---"
+          ls -la artifacts/27.0.1/kc-k27.bin* 2>/dev/null || true
+          file artifacts/27.0.1/kc-k27.bin 2>/dev/null || true
+
+      - name: Upload full build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k27-kc-build-log
+          path: |
+            /tmp/pass1.log
+            /tmp/pass2.log
+          if-no-files-found: error
+
+      - name: Upload KC-layout kernel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xnu-12377-k27-kc-kernel
+          path: |
+            unixnu-ios26/build/xnu-12377.121.6/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837*
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload kernel collection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kc-k27
+          path: |
+            droidvm/artifacts/27.0.1/kc-k27.bin
+            droidvm/artifacts/27.0.1/kc-k27.bin.natives.json
+          if-no-files-found: ignore
+          retention-days: 7
