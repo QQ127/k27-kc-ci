@@ -51,11 +51,11 @@ jobs:
           cp -R droidvm/patches/xnu-12377 unixnu-ios26/patches/xnu-12377
           echo "patches: $(ls unixnu-ios26/patches/xnu-12377/*.patch | wc -l)"
 
-      - name: Add K27 early framebuffer diagnostic patch (v28 green band)
+      - name: Add K29 early framebuffer diagnostic patch (v29 green bar at _start + spin)
         run: |
-          echo 'ZGlmZiAtLWdpdCBhL29zZm1rL2FybTY0L3N0YXJ0LnMgYi9vc2Ztay9hcm02NC9zdGFydC5zCi0tLSBhL29zZm1rL2FybTY0L3N0YXJ0LnMKKysrIGIvb3NmbWsvYXJtNjQvc3RhcnQucwpAQCAtNDgwLDYgKzQ4MCwxOCBAQAogCU1TUl9WQkFSX0VMMV9YMAogCiAKKwkvKiBLMjctRUFSTFktRElBRzogcGFpbnQgdG9wIDIgZnJhbWVidWZmZXIgcm93cyBicmlnaHQgZ3JlZW4gKHBoeXNpY2FsLCBNTVUgb2ZmKSAqLworCW1vdgl4NiwgeDIwCisJbGRyCXgwLCBbeDYsICMweDI4XQorCWNiegl4MCwgTGsyN2RpYWdfZG9uZQorCWxkcgl4MSwgW3g2LCAjMHgzOF0KKwlsc2wJeDEsIHgxLCAjMQorCW1vdgl3MiwgIzB4MDBGRjAwMDAKKwltb3YJeDMsIHgwCitMazI3ZGlhZ19sb29wOglzdHIJdzIsIFt4M10sICM0CisJc3Vicwl4MSwgeDEsICM0CisJYi5ndAlMazI3ZGlhZ19sb29wCitMazI3ZGlhZ19kb25lOgogCS8vIEdldCB0aGUga2VybmVsIG1lbW9yeSBwYXJhbWV0ZXJzIGZyb20gdGhlIGJvb3QgYXJncwogCWxkcgkJeDIyLCBbeDIwLCBCQV9WSVJUX0JBU0VdCQkJLy8gR2V0IHRoZSBrZXJuZWwgdmlydCBiYXNlCiAJbGRyCQl4MjMsIFt4MjAsIEJBX1BIWVNfQkFTRV0JCQkvLyBHZXQgdGhlIGtlcm5lbCBwaHlzIGJhc2UK' | base64 -d > unixnu-ios26/patches/xnu-12377/9999-k27-early-fb-diag.patch
+          echo 'ZGlmZiAtLWdpdCBhL29zZm1rL2FybTY0L3N0YXJ0LnMgYi9vc2Ztay9hcm02NC9zdGFydC5zCi0tLSBhL29zZm1rL2FybTY0L3N0YXJ0LnMKKysrIGIvb3NmbWsvYXJtNjQvc3RhcnQucwpAQCAtMjMwLDYgKzIzMCwxOSBAQAogCS5nbG9ibCBFWFQoX3N0YXJ0KQogTEVYVChfc3RhcnQpCiAJQVJNNjRfUFJPTE9HCisJLyogSzI5LUVBUkxZLURJQUc6IHBhaW50IHRvcCA4IGZyYW1lYnVmZmVyIHJvd3MgR1JFRU4gdGhlbiBzcGluIChwaHlzaWNhbCwgTU1VIG9mZikgKi8KKwltb3YJeDYsIHgwCisJbGRyCXgwLCBbeDYsICMweDI4XQorCWNiegl4MCwgTGsyOXNwaW4KKwlsZHIJeDEsIFt4NiwgIzB4MzhdCisJbHNsCXgxLCB4MSwgIzMKKwltb3YJdzIsICMweDAwRkYwMDAwCisJbW92CXgzLCB4MAorTGsyOWxvb3A6CXN0cgl3MiwgW3gzXSwgIzQKKwlzdWJzCXgxLCB4MSwgIzQKKwliLmd0CUxrMjlsb29wCitMazI5c3BpbjoKKwliCUxrMjlzcGluCiAJYglFWFQoc3RhcnRfZmlyc3RfY3B1KQogCiAK' | base64 -d > unixnu-ios26/patches/xnu-12377/9999-k29-early-fb-diag.patch
           echo "patches now: $(ls unixnu-ios26/patches/xnu-12377/*.patch | wc -l)"
-          grep -c K27-EARLY-DIAG unixnu-ios26/patches/xnu-12377/9999-k27-early-fb-diag.patch
+          grep -c K29-EARLY-DIAG unixnu-ios26/patches/xnu-12377/9999-k29-early-fb-diag.patch
 
       - name: Switch to arm64e + macOS target (firehose arm64e too)
         run: |
