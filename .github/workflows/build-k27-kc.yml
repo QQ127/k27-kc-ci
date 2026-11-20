@@ -134,8 +134,11 @@ jobs:
           decl='extern "C" void (*arm64_platform_sleep_hook) (boolean_t boot_cpu) __attribute__((weak_import));'
           repl='extern "C" void (*arm64_platform_sleep_hook) (boolean_t boot_cpu) = 0;'
           assert decl in s, 'weak_import decl not found'
-          open(p,'w').write(s.replace(decl,repl,1))
-          print('defined arm64_platform_sleep_hook = 0')
+          s=s.replace(decl,repl,1)
+          # &hook is now always true (non-weak definition) -> -Werror pointer-bool-conversion.
+          s=s.replace('sleep == 1 && &arm64_platform_sleep_hook && ', 'sleep == 1 && ', 1)
+          open(p,'w').write(s)
+          print('defined arm64_platform_sleep_hook = 0 and dropped always-true guard')
           PYHOOK
           ls -la build/platform-12377/ArmCpu/
 
