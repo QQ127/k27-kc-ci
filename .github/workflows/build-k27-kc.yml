@@ -124,6 +124,19 @@ jobs:
           cd unixnu-ios26
           mkdir -p build/platform-12377/ArmCpu
           cp drivers/ArmCpu/ArmCpuSleep.h build/platform-12377/ArmCpu/
+          # The freshly-cloned ArmCpu declares arm64_platform_sleep_hook as
+          # weak_import, but this kernel patch set never defines it -> ld fails.
+          # The board sleep hook is unused in this kernel, so give it a NULL
+          # definition so the arm64e kernel link resolves.
+          python3 - <<'PYHOOK'
+          p='drivers/ArmCpu/ArmCpu.cpp'
+          s=open(p).read()
+          decl='extern "C" void (*arm64_platform_sleep_hook) (boolean_t boot_cpu) __attribute__((weak_import));'
+          repl='extern "C" void (*arm64_platform_sleep_hook) (boolean_t boot_cpu) = 0;'
+          assert decl in s, 'weak_import decl not found'
+          open(p,'w').write(s.replace(decl,repl,1))
+          print('defined arm64_platform_sleep_hook = 0')
+          PYHOOK
           ls -la build/platform-12377/ArmCpu/
 
       - name: Pass 1 - plain layout (owner macros + board drivers, no KC segaddrs)
