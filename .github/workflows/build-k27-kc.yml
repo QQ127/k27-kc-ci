@@ -236,32 +236,56 @@ jobs:
         working-directory: droidvm
         run: |
           python3 - <<'PYTOL'
+          import struct
           p='k27/kc-build27.py'
           s=open(p).read()
-          # Our rebuilt XNU lacks a few Apple-private symbols that borrowed kexts
-          # reference by chained pointer (e.g. _os_log_coprocessor_with_handle).
-          # Remap.map aborts on these. Wrap it: when the old-kernel target's names
-          # are all undefined in the new kernel, keep the original address (the KC
-          # layout pins our kernel to the old VMADDRs) instead of failing the build.
+          # Rebind kext pointers to Apple-private symbols that our source-built
+          # kernel does not define (e.g. _os_log_coprocessor_with_handle / _os_metric_coprocessor)
+          # onto a real `ret` in the new kernel's __TEXT_EXEC. Returning the OLD address
+          # (previous attempt) fails the 1 GiB collection-window check; a ret landing pad
+          # is in-window AND harmless if such a coprocessor stub is ever called.
+          # Text branches (exact=True) still fail loudly: a wrong branch target is unsafe.
+          KERN='../unixnu-ios26/build/xnu-12377.121.6/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf'
+          d=open(KERN,'rb').read()
+          assert d[:4]==b'\xcf\xfa\xed\xfe', 'kernel is not little-endian Mach-O 64'
+          ncmds=struct.unpack_from('<I', d, 16)[0]
+          off=32
+          text_exec=None
+          for _ in range(ncmds):
+              cmd, cmdsize = struct.unpack_from('<II', d, off)
+              if cmd == 0x19:
+                  name = d[off+8:off+24].rstrip(b'\0').decode()
+                  if name == '__TEXT_EXEC':
+                      text_exec = struct.unpack_from('<QQQQ', d, off+24)
+              off += cmdsize
+          assert text_exec, 'no __TEXT_EXEC segment in rebuilt kernel'
+          vmaddr, vmsize, fileoff, filesize = text_exec
+          body = d[fileoff:fileoff+filesize]
+          RET = None
+          for i in range(0, len(body)-3, 4):
+              if body[i:i+4] == b'\xc0\x03\x5f\xd6':
+                  RET = vmaddr + i
+                  break
+          assert RET is not None, 'no aligned ret in __TEXT_EXEC'
+          print('fallback ret landing pad: %#x' % RET)
           anchor='module.main()'
           assert anchor in s, 'main anchor missing'
           inject='''# tolerate private symbols missing from the source-built kernel
           _orig_map = module.kc_reloc.Remap.map
+          _RET = __RET__
           def _map_tolerant(self, va, exact=False):
               try:
                   return _orig_map(self, va, exact)
               except module.kc_reloc.Unresolvable as exc:
-                  # Only degrade chained-data pointers (exact=False). Text branches
-                  # (exact=True) must still fail loudly: a wrong branch target is unsafe.
                   if exact:
                       raise
-                  print('TOLERATED unresolvable kernel symbol %#x: %s' % (va, exc))
-                  return va
+                  print('TOLERATED unresolvable %#x -> ret %#x: %s' % (va, _RET, exc))
+                  return _RET
           module.kc_reloc.Remap.map = _map_tolerant
-          '''
+          '''.replace('__RET__', hex(RET))
           s=s.replace(anchor, inject+chr(10)+anchor, 1)
           open(p,'w').write(s)
-          print('patched Remap.map tolerant fallback')
+          print('patched Remap.map tolerant fallback with in-window ret landing pad')
           PYTOL
 
       - name: Build KC (kc-build27.py - kernel-only fileset)
