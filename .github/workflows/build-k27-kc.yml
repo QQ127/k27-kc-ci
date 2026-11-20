@@ -119,6 +119,13 @@ jobs:
           print('patched build-platform-12377.py for arm64e/macOS + skip applied ArmCpu patches')
           PY
 
+      - name: Stage ArmCpuSleep.h next to patched ArmCpu.cpp
+        run: |
+          cd unixnu-ios26
+          mkdir -p build/platform-12377/ArmCpu
+          cp drivers/ArmCpu/ArmCpuSleep.h build/platform-12377/ArmCpu/
+          ls -la build/platform-12377/ArmCpu/
+
       - name: Pass 1 - plain layout (owner macros + board drivers, no KC segaddrs)
         working-directory: unixnu-ios26
         run: |
